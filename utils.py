@@ -73,24 +73,41 @@ def mergeDict(src, target, *keyfilter):
   return target
 
 def mergeDictIfNotDefault(src, target, key, defaultValue):
+  """Copy the key,value pair specified by KEY into TARGET from SRC if
+  the value is not equal to DEFAULTVALUE"""
   if src[key] != defaultValue:
     target[key] = src[key]
     return True
   return False
 
 def to_binary_string(n):
+  """Simple binary string formatter. I believe that this is supported
+  by python format language in later versions of the standard
+  library."""
   l = []
   while (n != 0):
     l.insert(0, n & 0x1)
     n = n >> 1
-  return "".join([str(i) for i in l])
+  return "0b" + "".join([str(i) for i in l])
+
+def convertKeyToHexString(d, *keyfilter):
+  """Change the numbers in the dictionary D with keys in the list
+  KEYFILTER to length-4 zero padded hexadecimal strings."""
+  for k in keyfilter:
+    d[k] = "0x%04x" % d[k]
 
 def x10TimeToTime(double_hour, mins_to_120):
+  """Convert the X10 format date to a datetime.time
+  instance. DOUBLE_HOUR represents the hour of the day/2, MINS_TO_120
+  is the number of minutes between these 2-hour markers."""
   if double_hour > 12:
     raise Exception("nonsensical time spec: %(double_hour)d, %(mins_to_120)d" % locals())
   return datetime.time(2*double_hour + (mins_to_120/60), mins_to_120 % 60)
 
 def x10TimeToString(double_hour, mins_to_120, isTimerInitiator=True):
+  """Convert the X10 format date to a string, as sepcified above, but
+  also check for special values in the CM15 timer initiator bytecode
+  which specify the variable times of sunrise and sunset."""
   if isTimerInitiator and (double_hour > 12):
     if double_hour == 14:
       time = "Sunrise"
@@ -105,12 +122,15 @@ def x10TimeToString(double_hour, mins_to_120, isTimerInitiator=True):
   return x10TimeToTime(double_hour, mins_to_120).strftime("%H:%M")
 
 def x10YearDayToString(year_day, year=None):
+  """Format the given year day (1-366) as ISO-8601 date. Note that
+  dates after Feb 28th will be different for the same year day in leap
+  years. If YEAR is given it is used in the calculation, otherwise the
+  system clock's year is used."""
   if year is None:
     year=datetime.date.today().year
   timeStr = "%(year_day)d %(year)d" % locals()
   date = datetime.datetime.strptime(timeStr, "%j %Y").date()
   return date.isoformat()
-
 
 def formatWeekMask(m):
   mask = "SMTWTFS"
@@ -148,11 +168,13 @@ class Latch:
 
   def __init__(self):
     self.isopen = False
+    self.isAcknowledged = False
     self.condition = threading.Condition()
 
   def waitForIt(self, timeoutInSecs=None):
     self.condition.acquire()
-    self.condition.wait(timeoutInSecs)
+    if not self.isopen:
+      self.condition.wait(timeoutInSecs)
     self.condition.release()
     if not self.isopen:
       raise Exception("timed out waiting for latch to open")
@@ -168,6 +190,75 @@ class JSONEncoder(json.JSONEncoder):
     if hasattr(obj, "toJSON"):
       return obj.toJSON()
     return json.JSONEncoder.default(self, obj)
+
+class MemoryBuffer:
+
+  def __init__(self, copy=None, debug=False, capacity=0x2000):
+    self.__debug = debug
+    if copy is not None:
+      self.__rom = list(copy.__rom)
+    else:
+      self.__rom = [None for i in range(0, capacity)]
+
+  def __len__(self):
+    return len(self.__rom)
+
+  def __getitem__(self, idx):
+    l = self.__rom[idx]
+    if self.__debug:
+      if isinstance(idx, slice):
+        for b in l:
+          if b is None:
+            raise Exception("attempt to read null byte in %s" %idx)
+        for i in range(idx.start, idx.stop, idx.step or 1):
+          self.__rom[i] = None
+      else:
+        if self.__rom[idx] is None:
+          raise Exception("attempt to read null byte at 0x%04x" % idx)
+        self.__rom[idx] = None
+    return l
+
+  def __setitem__(self, idx, val):
+    self.__rom[idx] = val
+
+  def peek(self, idx):
+    return self.__rom[idx]
+
+  def dump(self, fh):
+    for i in range(0, len(self.__rom), 16):
+      fh.write("0x%04x " % i)
+      for j in range(0, 4):
+        for k in range(0,4):
+          b = self.__rom[i + j*4 + k]
+          s = ".."
+          if b is not None:
+            s = "%02x" % b
+          fh.write(s)
+        fh.write(" ")
+      fh.write("\n")
+
+  def describeUnread(self):
+    l = []
+    for i in range(0, len(self)):
+      if self.__rom[i] is None:
+        if len(l) > 0 and l[-1][-1] is None:
+          l[-1][-1] = i-1
+      else:
+        if len(l) == 0 or l[-1][-1] is not None:
+          l.append([i, None])
+    if len(l) > 0 and l[-1][-1] is None:
+      l[-1][-1] = i
+    return l
+
+  def used(self):
+    emptyCount = 0
+    totalLength = len(self.__rom)
+    for b in self.__rom:
+      if b is None:
+        emptyCount += 1
+    return totalLength-emptyCount
+
+
 
 
 class XMLBuilder:
@@ -215,5 +306,14 @@ if __name__ == "__main__":
       self.assertEqual(len(input)/2, len(bytes))
       out = bytes_to_printed_bytes(bytes)
       self.assertEqual(input, out.replace(", ", "").replace("0x", "")[1:-1])
+
+    def testYearDayConversion(self):
+      leap_year = 2004
+      self.assertEqual("2004-01-01", x10YearDayToString(1, leap_year))
+      self.assertEqual("2004-02-29", x10YearDayToString(60, leap_year))
+      self.assertEqual("2005-03-01", x10YearDayToString(60, leap_year+1))
+      self.assertEqual("2004-12-31", x10YearDayToString(366, leap_year))
+      self.assertEqual("2004-12-31", x10YearDayToString(367, leap_year))
+
 
   unittest.main()
