@@ -29,15 +29,17 @@ import traceback
 
 DEVICE_POWER_FAIL = 0xa5
 DEVICE_POLL_PC = 0x5a
-DEVICE_EEPROM_DUMP = 0x5b
+DEVICE_MACRO_ADDR = 0x5b
 DEVICE_ACK = 0x55
 
-DEFAULT_DEVICE_TIMEOUT_SECONDS = 2.5
+CMD_DUMPMEM = 0xbd
+
+DEFAULT_DEVICE_TIMEOUT_SECONDS = 3.5
 
 logging.basicConfig(format="%(asctime)-15s [%(threadName)s] %(levelname)s: %(message)s")
 LOGGER = logging.getLogger(__name__)
 LOGGER.setLevel(logging.DEBUG)
-cm15_USB.LOGGER.setLevel(logging.DEBUG)
+cm15_USB.LOGGER.setLevel(logging.INFO)
 
 class cm15:
   "Abstraction of the CM15 device."
@@ -52,6 +54,7 @@ class cm15:
     readThreadStartedLatch = utils.Latch()
     readThread = threading.Thread(name="CM15ReadThread", target=lambda: self.__readDevice(readThreadStartedLatch))
     readThread.daemon = True
+    LOGGER.debug("starting reader thread")
     readThread.start()
     readThreadStartedLatch.waitForIt(5)
     LOGGER.debug("read thread started, waiting for input")
@@ -65,8 +68,9 @@ class cm15:
   
   def send_function(self, housecode, addressOrAddresses, function, dims=0):
 
-    def isLongrunningFunction(fcode):
-      return fcode == x10_powerline.UNDERSCORED_LOWERCASE_FUNCTION_TO_CODE_MAP["dim"]
+    def isDimOrBright(fcode):
+      return fcode == x10_powerline.UNDERSCORED_LOWERCASE_FUNCTION_TO_CODE_MAP["dim"] or \
+          fcode == x10_powerline.UNDERSCORED_LOWERCASE_FUNCTION_TO_CODE_MAP["bright"]
 
     if not hasattr(addressOrAddresses, "__iter__"):
       addressOrAddresses = [addressOrAddresses]
@@ -74,11 +78,15 @@ class cm15:
       for a in addressOrAddresses:
         data = x10_powerline.header_and_address(housecode, a)
         self.__send_and_await_response(data, DEFAULT_DEVICE_TIMEOUT_SECONDS, True)
-      data = x10_powerline.header_and_standard_function(housecode, function, dims)
+      data = x10_powerline.header_and_standard_function(housecode, function, 0) # always send dims of zero in the header, even for dim/bright command
       timeout = DEFAULT_DEVICE_TIMEOUT_SECONDS
       fcode = ord(data[1]) & 0xf
-      if isLongrunningFunction(fcode):
+      if isDimOrBright(fcode):
         timeout *= 2
+        # cm15 seems to want us to send dims as an additional byte (value 0-210),
+        # this is a departure from protocol.txt, which only specifies
+        # this for reading from the device
+        data += chr(max(0, min(210, int(dims)))) 
       self.__send_and_await_response(data, timeout, True)
     except Exception, e:
       exc_type, exc_value, exc_traceback = sys.exc_info()
@@ -98,7 +106,7 @@ class cm15:
         with self.awaitingResponseLock:
           self.awaitingResponse = True
         self.device.write(data)
-        LOGGER.info("written to device")
+        LOGGER.info("written to device %s" % ", ".join(["0x%02x" % ord(c) for c in data]))
         response = self.deviceResponseQueue.get(True, timeoutInSeconds)
         self.deviceResponseQueue.task_done()
         if expectDeviceAck:
@@ -172,11 +180,12 @@ class cm15:
           elif firstByte == DEVICE_ACK:
             buf.reset()
             # I guess this shouldn't happen
-            LOGGER.info("unsolicited ACK received data from device")
+            LOGGER.info("DEVICE: unsolicited ACK")
             if len(data) != 1:
-              LOGGER.error("unexpected data following DEVICE_ACK: " + printedBytes)
+              LOGGER.error("DEVICE: unexpected data following DEVICE_ACK: " + printedBytes)
 
           elif firstByte == DEVICE_POWER_FAIL :
+            LOGGER.info("DEVICE: resync after power failed")
             buf.reset()
             try:
               self.set_clock()
@@ -185,28 +194,28 @@ class cm15:
               msg = traceback.format_exception(exc_type, exc_value, exc_traceback);
               LOGGER.error("\n".join(msg))
 
-          elif firstByte == DEVICE_EEPROM_DUMP:
+          elif firstByte == DEVICE_MACRO_ADDR:
             buf.reset()
             highbyte = data[1] & 0x03 # only bits 1 and 2
             lowbyte  = data[2:]
             address = (highbyte * 0x100) + lowbyte
             msg = utils.bytes_to_printed_bytes(data)
-            LOGGER.info("EEPROM address dump: 0x%(address)0x - %(msg)s" % locals())
+            LOGGER.info("DEVICE: macro address 0x%(address)0x - %(msg)s" % locals())
             
           else:
             if buf.data is None:
-              LOGGER.error("unexpected data from device: " + printedBytes)
+              LOGGER.error("DEVICE: unexpected data - " + printedBytes)
             else:
               buf.data.extend(data)
 
           if buf.data is not None:
             if len(buf.data) > buf.size:
-              LOGGER.error("recieved more data than expected from poll request: size %d, len %d, data %s" % 
+              LOGGER.error("DEVICE: recieved more data than expected from poll request: size %d, len %d, data %s" % 
                            (buf.size, len(buf.data), utils.bytes_to_printed_bytes(buf.data)))
               buffer = None
               size = 0
             elif len(buf.data) == buf.size:
-              LOGGER.info("received complete poll request: %s" % utils.bytes_to_printed_bytes(buf.data))
+              LOGGER.info("DEVICE: received complete poll request: %s" % utils.bytes_to_printed_bytes(buf.data))
               # TODO: further processing here.
               buf.reset()
     
@@ -216,11 +225,29 @@ class cm15:
         LOGGER.error("\n".join(msg))
         
                 
+def print_usage(stream = sys.stderr):
+  prog = os.path.basename(sys.argv[0])
+  usage = """USAGE: %(prog)s --housecode [A-P]\n"""
+  stream.write(usage % locals())
 
-if __name__ == "__main__":
+def main():
 
   import readline
   import traceback
+  import getopt
+
+  housecode = None
+  (opts, remainargs) = getopt.getopt(sys.argv[1:], "hc:", ["help", "housecode="])
+  for k,v in opts:
+    if k in ("-?", "-h", "--help"):
+      print_usage()
+      sys.exit(0)
+    elif k in ("-c", "--housecode"):
+      housecode = v.upper()
+  
+  if housecode is None:
+    print_usage()
+    sys.exit(1)
 
   histfile = os.path.join(os.path.expanduser("~"), ".x10history")
   try:
@@ -230,7 +257,7 @@ if __name__ == "__main__":
   import atexit
   atexit.register(readline.write_history_file, histfile)
   
-  cm15 = cm15('A')
+  x10device = cm15(housecode)
 
   continueLooping = True
 
@@ -247,13 +274,17 @@ if __name__ == "__main__":
           print "ERROR - USAGE: send <housecode> <unitcode_or_codes> <function> [<dims>]"
           continue
         funcargs[1] = eval(funcargs[1])
-        cm15.send_function(*funcargs)
+        x10device.send_function(*funcargs)
       elif tokens[0] == "send_raw":
         data = "".join(tokens[1:])
         data = utils.printed_bytes_to_bytes(data)
-        cm15.send_raw(utils.bytes_2_str(data))
+        x10device.send_raw(utils.bytes_2_str(data))
       elif tokens[0] == "quit":
         continueLooping = False
+    except EOFError:
+      continueLooping = False
     except:
       traceback.print_exc()
 
+if __name__ == "__main__":
+  main()
