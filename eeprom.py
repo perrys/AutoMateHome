@@ -16,7 +16,6 @@
 # along with AutoMateHome.  If not, see <http://www.gnu.org/licenses/>.
 
 import datetime
-import xml.etree.ElementTree
 import json
 import sys
 
@@ -31,31 +30,87 @@ CLAUSE_TYPE_MODULES_OFF = 4
 CLAUSE_TYPE_FLAGS_ON    = 5
 CLAUSE_TYPE_FLAGS_OFF   = 6
 
+class MacroInitiator:
+  """Represents an event-based trigger for a macro chain. The trigger
+  consists of a house and unit code, and zero or more clauses. When a
+  matching powerline event is received and the clauses are satisfied,
+  the specified macro chain will be executed."""
+
+  def __init__(self, bytes, offset=0):
+    """Create a macro initiator from bytecode. The code specifies the
+    house/unit codes and zero or more clauses.
+
+    The format of the bytecode is described by the MACRO_INITIATOR
+    instance in the codec module."""
+    
+    self.__dict__.update(codec.MACRO_INITIATOR.decode(bytes, offset))
+    self.house_code  = codec.VALUE_TO_HOUSECODE_MAP[self.house_code]
+    self.unit_code = codec.VALUE_TO_UNITCODE_MAP[self.unit_code]
+
+    self.clauses = []
+    for i in range(0, self.n_clauses):
+      offset += 3
+      self.clauses.append(MacroInitiatorClause.create(bytes, offset))
+    self.codelength = 3 * self.n_clauses + 3
+
+  def __str__(self):
+    clauses = [("   ", str(c.__dict__)) for c in self.clauses]
+    data = [
+      [" house_code:", self.house_code],
+      [" unit code:",  self.unit_code],
+      [" trigger:",    self.trigger_on_off and "on" or "off"],
+      [" macro:",      "0x%04x" % self.macro_ptr],
+      [" clauses:",    "\n" + utils.formatTable(clauses)],
+      ]
+    return utils.formatTable(data)
+
+  def toJSON(self):
+    d = dict(self.__dict__)
+    del d["n_clauses"]
+    del d["codelength"]
+    if self.reserved == 0:
+      del d["reserved"]
+    d["trigger_on_off"] = self.trigger_on_off and "on" or "off"
+    utils.convertKeyToHexString(d, "macro_ptr")
+    return d
+
+    # l = [self.house_code, self.unit_code, self.trigger_on_off and "on" or "off", "0x%04x" % self.macro_ptr]
+    # if self.reserved != 0:
+    #   l.append(self.reserved)
+    # l.append(self.clauses)
+    # return l
+
 class MacroInitiatorClause(object):
+  """Base class for a clause in a macro initiator."""
 
   @staticmethod
   def create(bytes, offset=0):
+    """Create a macro clause of the correct subtype"""
+
     # hack to avoid double read in debug mode:
-    if isinstance(bytes, MemoryBuffer):
+    if isinstance(bytes, utils.MemoryBuffer):
       header_byte = [bytes.peek(offset)]
     else:
       header_byte = bytes[offset:offset+1]
+
+    # we need to peek at the type byte to figure out what kind of
+    # clause to create:
     attribs = codec.MACRO_INITIATOR_CLAUSE_HEADER.decode(header_byte)
     clauseType = attribs["type"]
-    if clauseType == CLAUSE_TYPE_TIME:
-      return MacroInitiatorClauseTimeType(bytes, offset)
-    elif clauseType == CLAUSE_TYPE_DATE:
-      return MacroInitiatorClauseDateType(bytes, offset)
-    elif clauseType == CLAUSE_TYPE_DAY:
-      return MacroInitiatorClauseDayType(bytes, offset)
-    elif clauseType == CLAUSE_TYPE_MODULES_OFF or clauseType == CLAUSE_TYPE_MODULES_ON:
-      return MacroInitiatorClauseModulesType(bytes, offset)
-    elif clauseType == CLAUSE_TYPE_FLAGS_OFF or clauseType == CLAUSE_TYPE_FLAGS_ON:
-      return MacroInitiatorClauseFlagsType(bytes, offset)
-    else:
+    
+    ctr = CLAUSE_TYPE_DISPLATCH_TABLE.get(clauseType)
+    if ctr is None:
       raise Exception("unknown macro initiator clause type: 0x%0x" % clauseType)
 
+    return ctr(bytes, offset)
+
   def __init__(self, bytes, offset=0):
+    """Base class constructor for the macro initiator clauses, which
+    have a common header, described by the
+    MACRO_INITIATOR_CLAUSE_HEADER instance in the codec
+    module. Relevant data in the header are the logic op (i.e. "and"
+    or "or") and the comparison op (less, greater, equal, not)."""
+
     self.__dict__.update(codec.MACRO_INITIATOR_CLAUSE_HEADER.decode(bytes, offset))
     self.logic_op = codec.MACRO_INITIATOR_HEADER_LOGIC_OPS[self.logic_op]
     self.compare_op = codec.MACRO_INITIATOR_HEADER_COMPARE_OPS[self.compare_op]
@@ -67,7 +122,13 @@ class MacroInitiatorClause(object):
     return l
 
 class MacroInitiatorClauseTimeType(MacroInitiatorClause):
+  """Clause specifying a time, which is compared with the current time
+  using the compare operator. Note that the code supports special time
+  codes for sunrise and sunset, which are obviously variable from day
+  to day and depend on geographical location.""" 
+
   def __init__(self, bytes, offset=0):
+    
     super(self.__class__, self).__init__(bytes, offset)
     vars(self).update(codec.MACRO_INITIATOR_CLAUSE_BODY_TIME_TYPE.decode(bytes, 1+offset))
     self.time = utils.x10TimeToTime(self.double_hour, self.min)
@@ -83,11 +144,15 @@ class MacroInitiatorClauseTimeType(MacroInitiatorClause):
     else:
       time = self.time.strftime("%H:%M")
     l["time"] = time
-    utils.mergeDictIfNotDefault(vars(), l, "time", None)
     utils.mergeDictIfNotDefault(vars(self), l, "reserved", 0)
     return l
 
 class MacroInitiatorClauseDateType(MacroInitiatorClause):
+  """Clause specifying a day of the year, which is compared with the
+  current day of the year using the compare operator. Note that the
+  year day is converted to a date for display/readability but this
+  will be different for dates after 28th February on yeap years."""
+
   def __init__(self, bytes, offset=0):
     super(self.__class__, self).__init__(bytes, offset)
     self.__dict__.update(codec.MACRO_INITIATOR_CLAUSE_BODY_DATE_TYPE.decode(bytes, 1+offset))
@@ -102,6 +167,8 @@ class MacroInitiatorClauseDateType(MacroInitiatorClause):
     return l
 
 class MacroInitiatorClauseDayType(MacroInitiatorClause):
+  """Clause specifying one or more days of the week. Only the "equals"
+  and "not" comparison operators are valid for this type of clause."""
   def __init__(self, bytes, offset=0):
     super(self.__class__, self).__init__(bytes, offset)
     self.__dict__.update(codec.MACRO_INITIATOR_CLAUSE_BODY_DAY_TYPE.decode(bytes, 1+offset))
@@ -137,63 +204,55 @@ class MacroInitiatorClauseModulesType(MacroInitiatorClause):
     l["Criteria"] = self.type == CLAUSE_TYPE_MODULES_ON and "on" or "off"
     utils.mergeDictIfNotDefault(vars(self), l, "modules", None)
 
-class MacroInitiator:
-  def __init__(self, bytes, offset=0):
-    self.__dict__.update(codec.MACRO_INITIATOR.decode(bytes, offset))
-    self.clauses = []
-    for i in range(0, self.n_clauses):
-      offset += 3
-      self.clauses.append(MacroInitiatorClause.create(bytes, offset))
-    self.codelength = 3 * self.n_clauses + 3
-    self.house_code  = codec.VALUE_TO_HOUSECODE_MAP[self.house_code]
-    self.unit_code = codec.VALUE_TO_UNITCODE_MAP[self.unit_code]
+CLAUSE_TYPE_DISPLATCH_TABLE = {
+  CLAUSE_TYPE_TIME        : MacroInitiatorClauseTimeType,
+  CLAUSE_TYPE_DATE        : MacroInitiatorClauseDateType,
+  CLAUSE_TYPE_DAY         : MacroInitiatorClauseDayType,
+  CLAUSE_TYPE_MODULES_ON  : MacroInitiatorClauseModulesType,
+  CLAUSE_TYPE_MODULES_OFF : MacroInitiatorClauseModulesType,
+  CLAUSE_TYPE_FLAGS_ON    : MacroInitiatorClauseFlagsType,
+  CLAUSE_TYPE_FLAGS_OFF   : MacroInitiatorClauseFlagsType,
+  }
 
-  def __str__(self):
-    clauses = [("   ", str(c.__dict__)) for c in self.clauses]
-    data = [
-      [" house_code:", self.house_code],
-      [" unit code:",  self.unit_code],
-      [" trigger:",    self.trigger_on_off and "on" or "off"],
-      [" macro:",      "0x%04x" % self.macro_ptr],
-      [" clauses:",    "\n" + utils.formatTable(clauses)],
-      ]
-    return utils.formatTable(data)
+
+class TimerInitiator:
+  """Represents a timer initiator in the EEPROM - i.e, a point-in-time
+  trigger for a macro chain. This is simpler to describe than a macro
+  initiator as it is a time-based spec without other conditional
+  parts.
+
+  Note that timer initiators have two events and macro chains
+  associated with them (start and stop).
+  """
+
+  def __init__(self, bytes, offset=0):
+    """Create a timer initiator from bytecode."""
+    vars(self).update(codec.TIMER_INITIATOR.decode(bytes, offset))
+    self.codelength = codec.TIMER_INITIATOR.codelength
 
   def toJSON(self):
-    d = dict(self.__dict__)
-    del d["n_clauses"]
-    del d["codelength"]
-    if self.reserved == 0:
-      del d["reserved"]
-    d["trigger_on_off"] = self.trigger_on_off and "on" or "off"
-    return d
+    t = vars(self)
+    tijson = utils.mergeDict(t, None, "start_macro_ptr", "stop_macro_ptr", "start_macro_id", "stop_macro_id")
+    utils.convertKeyToHexString(tijson, "start_macro_ptr", "stop_macro_ptr", "start_macro_id", "stop_macro_id")
+    if utils.mergeDictIfNotDefault(t, tijson, "begin_year_day", 0):
+      tijson["start_date_display"] = utils.x10YearDayToString(t["begin_year_day"])
+    if utils.mergeDictIfNotDefault(t, tijson, "end_year_day", 367):
+      tijson["stop_date_display"] = utils.x10YearDayToString(t["end_year_day"])
+    utils.mergeDictIfNotDefault(t, tijson, "start_security", 0)
+    utils.mergeDictIfNotDefault(t, tijson, "stop_security", 0)
+    tijson["start_time"] = utils.x10TimeToString(t["start_double_hour"], t["start_min"])
+    tijson["stop_time"] = utils.x10TimeToString(t["stop_double_hour"], t["stop_min"])
+    tijson["week_day_mask"] = utils.formatWeekMask(t["week_day_mask"])
+    return tijson
 
-    # l = [self.house_code, self.unit_code, self.trigger_on_off and "on" or "off", "0x%04x" % self.macro_ptr]
-    # if self.reserved != 0:
-    #   l.append(self.reserved)
-    # l.append(self.clauses)
-    # return l
-
-  def toXML(self, builder):
-    builder.start("MacroInitiator")
-    builder.start("HouseCode").data(self.house_code).end()
-    builder.start("UnitCode").data(self.unit_code).end()
-    builder.start("Trigger").data(self.trigger_on_off and "on" or "off").end()
-    builder.start("Macro").data("0x%04x" % self.macro_ptr).end()
-    if self.reserved != 0:
-      builder.start("Reserved").data(self.reserved).end()
-    if self.n_clauses > 0:
-      builder.start("Clauses")
-      for c in self.clauses:
-        c.toXML(builder)
-      builder.end()
-    builder.end()
+                      
 
 class MacroChain:
+  """A set of macros to be executed in response to either a macro initiator or a timer initiator."""
 
   def __init__(self, bytes, offset=0):
-    start = offset
     self.id = offset
+    offset += 1
     self.__dict__.update(codec.MACRO_HEADER.decode(bytes, offset))
     offset += codec.MACRO_HEADER.codelength
     self.elements = []
@@ -218,75 +277,9 @@ class MacroChain:
 
   def toJSON(self):
     l = utils.mergeDict(vars(self), None, "delay_secs", "elements", "id")
+    utils.convertKeyToHexString(l, "id")
     l["reserved"] = utils.to_binary_string(self.reserved_1)
     return l
-
-class MemoryBuffer:
-
-  def __init__(self, copy=None, debug=False, capacity=0x2000):
-    self.__debug = debug
-    if copy is not None:
-      self.__rom = list(copy.__rom)
-    else:
-      self.__rom = [None for i in range(0, capacity)]
-
-  def __len__(self):
-    return len(self.__rom)
-
-  def __getitem__(self, idx):
-    l = self.__rom[idx]
-    if self.__debug:
-      if isinstance(idx, slice):
-        for b in l:
-          if b is None:
-            raise Exception("attempt to read null byte in %s" %idx)
-        for i in range(idx.start, idx.stop, idx.step or 1):
-          self.__rom[i] = None
-      else:
-        if self.__rom[idx] is None:
-          raise Exception("attempt to read null byte at 0x%04x" % idx)
-        self.__rom[idx] = None
-    return l
-
-  def __setitem__(self, idx, val):
-    self.__rom[idx] = val
-
-  def peek(self, idx):
-    return self.__rom[idx]
-
-  def dump(self, fh):
-    for i in range(0, len(self.__rom), 16):
-      fh.write("0x%04x " % i)
-      for j in range(0, 4):
-        for k in range(0,4):
-          b = self[i + j*4 + k]
-          s = ".."
-          if b is not None:
-            s = "%02x" % b
-          fh.write(s)
-        fh.write(" ")
-      fh.write("\n")
-
-  def describeUnread(self):
-    l = []
-    for i in range(0, len(self)):
-      if self.__rom[i] is None:
-        if len(l) > 0 and l[-1][-1] is None:
-          l[-1][-1] = i-1
-      else:
-        if len(l) == 0 or l[-1][-1] is not None:
-          l.append([i, None])
-    if len(l) > 0 and l[-1][-1] is None:
-      l[-1][-1] = i
-    return l
-
-  def used(self):
-    emptyCount = 0
-    totalLength = len(self.__rom)
-    for b in self.__rom:
-      if b is None:
-        emptyCount += 1
-    return totalLength-emptyCount
 
 
 class EEPROM:
@@ -303,12 +296,17 @@ class EEPROM:
     self.timer_initiators = []
 
     ptr = 0x19
-    while (self.macro_initiator_table_offset - ptr) >= 10:
-      if (memoryBuffer.peek(ptr) & 0x80) == 0:
-        break
-      t = codec.TIMER_INITIATOR.decode(memoryBuffer, ptr)
+    first_indirect_ptr = 0xffff
+    while (self.macro_initiator_table_offset - ptr) > codec.TIMER_INITIATOR.codelength:
+      t = TimerInitiator(memoryBuffer, ptr)
       self.timer_initiators.append(t)
-      ptr += 10
+      for p in t.start_macro_ptr, t.stop_macro_ptr:
+        if p > 0:
+          first_indirect_ptr = min(first_indirect_ptr, p)
+      ptr += t.codelength
+      ptr += 1
+      if (first_indirect_ptr - ptr) < codec.TIMER_INITIATOR.codelength: 
+        break
 
     ptr = self.macro_initiator_table_offset+1
     self.macro_initiators = []
@@ -320,13 +318,48 @@ class EEPROM:
       
     self.macro_chains = []
     for m in self.macro_initiators:
-      self.macro_chains.append(MacroChain(memoryBuffer, m.macro_ptr + 1))
+      self.macro_chains.append(MacroChain(memoryBuffer, m.macro_ptr))
+
+    recorded_indirects = {}
+    recorded_macros = {}
+
+    def getMacroFromIndirect(offset):
+      if offset > 0:
+        indirect_ptr = recorded_indirects.get(offset)
+        if indirect_ptr is None:
+          indirect_ptr = utils.merge_bytes(memoryBuffer[offset+1:offset+3])
+          recorded_indirects[offset] = indirect_ptr
+        recorded_indirects[offset] = indirect_ptr
+        return indirect_ptr
+      return None
+
+    for t in self.timer_initiators:
+      for k in ["start_macro_ptr", "stop_macro_ptr"]:
+        m_ptr = getMacroFromIndirect(vars(t)[k])
+        if m_ptr is not None:
+          vars(t)[k.replace("_ptr", "_id")] = m_ptr
+          m = recorded_macros.get(m_ptr)
+          if m is None:
+            m = MacroChain(memoryBuffer, m_ptr)
+            recorded_macros[m_ptr] = m
+            self.macro_chains.append(m)
+
+    end_day = 0
+    ptr = self.sunrise_sunset_table_offset
+    self.sunrise_sunset_times = []
+    while end_day < 366 :
+      sunrise_sunset_time = codec.DAWN_DUSK_ENTRY.decode(memoryBuffer, ptr)
+      self.sunrise_sunset_times.append(sunrise_sunset_time)
+      ptr += codec.DAWN_DUSK_ENTRY.codelength
+      end_day += self.sunrise_sunset_resolution
 
   def toJSON(self):
     d = utils.mergeDict(vars(self), None)
     tis = d["timer_initiators"] = []
-    for t in self.timer_initiators:
-      tijson = utils.mergeDict(t, None, "start_macro_ptr", "stop_macro_ptr")
+    for timer in self.timer_initiators:
+      t = vars(timer)
+      tijson = utils.mergeDict(t, None, "start_macro_ptr", "stop_macro_ptr", "start_macro_id", "stop_macro_id")
+      utils.convertKeyToHexString(tijson, "start_macro_ptr", "stop_macro_ptr", "start_macro_id", "stop_macro_id")
       if utils.mergeDictIfNotDefault(t, tijson, "begin_year_day", 0):
         tijson["start_date_display"] = utils.x10YearDayToString(t["begin_year_day"])
       if utils.mergeDictIfNotDefault(t, tijson, "end_year_day", 367):
@@ -339,6 +372,9 @@ class EEPROM:
       tis.append(tijson)
     d["dst_data"]["start_date_display"] = utils.x10YearDayToString(self.dst_data["begin_year_day"])
     d["dst_data"]["stop_date_display"] = utils.x10YearDayToString(self.dst_data["end_year_day"])
+    sunrise_sunset_list = [{"rise": utils.x10TimeToString(l["start_double_hour"], l["start_min"]), "set": utils.x10TimeToString(l["stop_double_hour"], l["stop_min"])} \
+                             for l in d["sunrise_sunset_times"]]
+    d["sunrise_sunset_times"] = sunrise_sunset_list
     
     del d["sunrise_sunset_table_offset"]
     del d["macro_initiator_table_offset"]
@@ -394,7 +430,7 @@ class EEPROM:
     return utils.formatTable(data)
 
 def createFromUSBMONDump(fh):
-  rom = MemoryBuffer()
+  rom = utils.MemoryBuffer()
   tok = " = fb"
   toklen = len(tok)
   for line in fh:
@@ -416,15 +452,16 @@ if __name__ == "__main__":
     fh = open(sys.argv[1])
 
   origrom = createFromUSBMONDump(fh)
-  origrom.dump(sys.stdout)
+#  origrom.dump(sys.stdout)
 
-  mem = MemoryBuffer(origrom, True)
+  mem = utils.MemoryBuffer(origrom, True)
   rom = EEPROM(mem)
 #  print rom.describe()
   print json.dumps(rom, cls=utils.JSONEncoder, sort_keys=True,
                    indent=2, separators=(',', ': '))
 
-  unreadRanges = mem.describeUnread()
-#  print unreadRanges
-#  for (low, high) in unreadRanges:
-#    print "0x%04x - 0x%04x" % (low, high)
+  # unreadRanges = mem.describeUnread()
+  # print unreadRanges
+  # for (low, high) in unreadRanges:
+  #   print "0x%04x - 0x%04x" % (low, high)
+  # mem.dump(sys.stdout)
