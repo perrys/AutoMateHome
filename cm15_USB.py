@@ -66,9 +66,13 @@ class CM15:
     LOGGER.info("Poll thread started, waiting for input from device")
 
   def write(self, data):
-    """Send data to the device."""
+    """Send data to the device. DATA can be either a string or an array of bytes, but it must not be more than 8 bytes long."""
     if len(data) > 8:
       raise Exception("Cannot send more than 8 bytes per transfer to a low-speed USB device")
+
+    if not isinstance(data, str):
+      data = utils.bytes_2_str(data)
+
     with self.outputTBufferLock:
       USB_LIB.submitTransfer(self.outputTBuffer, data)
 
@@ -78,9 +82,7 @@ class CM15:
     specifies the length of time to wait for data - if this time is
     exceeded the method returns None.
 
-    If the response from the device is other than
-    LIBUSB_TRANSFER_COMPLETED, and exception is raised."""
-
+    The data is returned as an array of bytes. If the status is other than COMPLETE or TIMED_OUT, an exception is raised."""
     
     try:
       while True:
@@ -90,24 +92,26 @@ class CM15:
           return data
         elif USB_LIB.TRANSFER_TIMED_OUT == status:
           return None
-        LOGGER.error("incomplete response from device - status: %s" % USB_LIB.transferStatusStr(status))
+        LOGGER.error("incomplete response from device - status: %s, data: %s" % (USB_LIB.transferStatusStr(status), utils.bytes_to_printed_bytes(data)))
+        raise Exception("unexpected response in output buffer")
     except Queue.Empty:
       return None
-
 
   def __outputEndpointCallback(self, transfer):
     assert(USB_LIB.TRANSFER_TYPE_INTERRUPT == USB_LIB.getTransferType(transfer))
     assert(self.outputEndPoint == USB_LIB.getTransferEndpoint(transfer))
     status = USB_LIB.getTransferStatus(transfer) 
     data = USB_LIB.getTransferData(transfer)
-    LOGGER.debug("output [%s]: %s" % (USB_LIB.transferStatusStr(status), ", ".join(["0x%02x" % ord(c) for c in data])))
+    data = utils.str_2_bytes(data)
+    LOGGER.debug("output [%s]: %s" % (USB_LIB.transferStatusStr(status), utils.bytes_to_printed_bytes(data)))
 
   def __inputEndpointCallback(self, transfer):
     assert(USB_LIB.TRANSFER_TYPE_INTERRUPT == USB_LIB.getTransferType(transfer))
     assert(self.inputEndPoint == USB_LIB.getTransferEndpoint(transfer))
     status = USB_LIB.getTransferStatus(transfer) 
     data = USB_LIB.getTransferData(transfer)
-    LOGGER.debug("input [%s]: %s" % (USB_LIB.transferStatusStr(status), ", ".join(["0x%02x" % ord(c) for c in data])))
+    data = utils.str_2_bytes(data)
+    LOGGER.debug("input [%s]: %s" % (USB_LIB.transferStatusStr(status), utils.bytes_to_printed_bytes(data)))
     self.responseQueue.put((data, status))
     USB_LIB.submitTransfer(self.inputTBuffer)
 

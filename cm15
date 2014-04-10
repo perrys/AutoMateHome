@@ -145,7 +145,6 @@ class cm15:
         data = self.device.read()
         if data is None:
           continue
-        data = utils.str_2_bytes(data)
         printedBytes = utils.bytes_to_printed_bytes(data)
 
         # there is data from the device, and we need to decide what to do about it.
