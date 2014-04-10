@@ -59,7 +59,21 @@ def merge_bytes(data):
     multiplier *= 0x100
   return sum
 
-def mergeDict(src, target, *keyfilter):
+def unmerge_bytes(data, expectedLength=0):
+  """Reverse of merge_bytes() - break down the given number into an
+  8-bit number list, with the most significant byte returned first in
+  the list"""
+  bytes = []
+  while data > 0:
+    bytes.insert(0, data & 0xFF)
+    data = data >> 8
+  while len(bytes) < expectedLength:
+    bytes.insert(0, 0)
+  if expectedLength > 0 and len(bytes) != expectedLength:
+    raise Exception("%(data)d is too big to fit into %(expectedLength)d bytes" % locals())
+  return bytes
+
+def merge_dict(src, target, *keyfilter):
   """Return an updated TARGET dictionary (or a new dictionary if not
   provided) using the contents of SRC. If KEYFILTER is provided, use
   only keys in that list."""
@@ -72,10 +86,10 @@ def mergeDict(src, target, *keyfilter):
     target.update(src)
   return target
 
-def mergeDictIfNotDefault(src, target, key, defaultValue):
+def merge_dict_if_not_default(src, target, key, defaultValue):
   """Copy the key,value pair specified by KEY into TARGET from SRC if
   the value is not equal to DEFAULTVALUE"""
-  if src[key] != defaultValue:
+  if key in src and src[key] != defaultValue:
     target[key] = src[key]
     return True
   return False
@@ -90,13 +104,13 @@ def to_binary_string(n):
     n = n >> 1
   return "0b" + "".join([str(i) for i in l])
 
-def convertKeyToHexString(d, *keyfilter):
+def convert_key_to_hex_string(d, *keyfilter):
   """Change the numbers in the dictionary D with keys in the list
   KEYFILTER to length-4 zero padded hexadecimal strings."""
   for k in keyfilter:
     d[k] = "0x%04x" % d[k]
 
-def x10TimeToTime(double_hour, mins_to_120):
+def x10_time_to_time(double_hour, mins_to_120):
   """Convert the X10 format date to a datetime.time
   instance. DOUBLE_HOUR represents the hour of the day/2, MINS_TO_120
   is the number of minutes between these 2-hour markers."""
@@ -104,7 +118,29 @@ def x10TimeToTime(double_hour, mins_to_120):
     raise Exception("nonsensical time spec: %(double_hour)d, %(mins_to_120)d" % locals())
   return datetime.time(2*double_hour + (mins_to_120/60), mins_to_120 % 60)
 
-def x10TimeToString(double_hour, mins_to_120, isTimerInitiator=True):
+def time_to_x10_time(time):
+  """Convert the datetime.time instance to x10 representation"""
+  mins = 60 * (time.hour % 2) + time.minute
+  hour = time.hour / 2
+  return (hour, mins)
+
+def timespec_to_x10_time(timespec, isTimerInitiator=False):
+  """Convert HH:MM string to x10 representation"""
+  if isTimerInitiator and 2 == len(timespec):
+    assert(isinstance(timespec[0], str), isinstance(timespec[0], unicode))
+    if timespec[0].lower() == "sunrise":
+      double_hour = 14
+    elif timespec[0].lower() == "sunset":
+      double_hour = 15
+    mins = timespec[1]
+    if mins < 0:
+      mins = abs(mins) & 0x40
+    return double_hour, mins
+  else:
+    assert(5 == len(timespec))
+    return time_to_x10_time(datetime.datetime.strptime(timespec, "%H:%M").time())
+
+def x10_time_to_string(double_hour, mins_to_120, isTimerInitiator=True):
   """Convert the X10 format date to a string, as sepcified above, but
   also check for special values in the CM15 timer initiator bytecode
   which specify the variable times of sunrise and sunset."""
@@ -115,13 +151,14 @@ def x10TimeToString(double_hour, mins_to_120, isTimerInitiator=True):
       time = "Sunset"
     else:
       raise Exception("unknown double_hour: %(double_hour)d" % locals())
-    mins = mins_to_120 % 64
+    mins = mins_to_120 % 0x40
     if mins_to_120 & 0x40:
       mins *= -1
-    return (time, mins)
-  return x10TimeToTime(double_hour, mins_to_120).strftime("%H:%M")
+    return (time, mins) # tuple of the special time and its offset, e.g. "15 mins before sunset"
+  # ordinary ISO time string:                          
+  return x10_time_to_time(double_hour, mins_to_120).strftime("%H:%M")
 
-def x10YearDayToString(year_day, year=None):
+def x10_year_day_to_string(year_day, year=None):
   """Format the given year day (1-366) as ISO-8601 date. Note that
   dates after Feb 28th will be different for the same year day in leap
   years. If YEAR is given it is used in the calculation, otherwise the
@@ -132,36 +169,46 @@ def x10YearDayToString(year_day, year=None):
   date = datetime.datetime.strptime(timeStr, "%j %Y").date()
   return date.isoformat()
 
-def formatWeekMask(m):
+def datestring_to_x10_year_day(dateStr):
+  date = datetime.datetime.strptime(dateStr, "%Y-%m-%d").date()
+  return int(date.stftime("%j"))
+
+def alignToBoundary(address, alignment):
+  """Return a number rounded to the nearest boundary specified by
+  ALIGNMENT. If ALIGNMENT is positive round up, otherwise round
+  down."""
+  remainder = address % (-1 * alignment)
+  return address - remainder
+  
+
+def mask_to_numbers(mask):
+  i = 0;
+  result = []
+  while mask > 0:
+    if 1 & mask:
+      result.insert(0, i)
+    i += 1
+    mask = mask >> 1
+  return result
+
+def numbers_to_mask(numbers):
+  sum = 0
+  for f in numbers:
+    sum |= (1 << f)
+  return sum
+
+def week_mask_to_string(m):
   mask = "SMTWTFS"
   return "".join([(1 & (m >> i)) and mask[i] or "." for i in range(0,len(mask))])
 
-def formatTable(dataTable, hasHeader = False, nspaces=1):
-  maxlengths = []
-  buf = ""
-  data = []
-  for row in dataTable:
-    data.append([cell or "" for cell in row])
-
-  spaces = " " * nspaces
-
-  def getMaxLen(cell):
-    maxLen = 0
-    for l in str(cell).split("\n"):
-      maxLen = max(maxLen, len(l))
-    return maxLen
-
-  for row in data:
-    for i,cell in enumerate(row):
-      while len(maxlengths) <= i:
-        maxlengths.append(0)
-      maxlengths[i] = max(maxlengths[i], getMaxLen(cell))
-  for i,row in enumerate(data):
-    if hasHeader and i == 1:
-      buf += spaces.join(["-" * l for l in maxlengths]) + "\n"
-    buf += spaces.join([str(cell).ljust(maxlengths[i]) for i,cell in enumerate(row)]) + "\n"
-  
-  return buf
+def string_to_week_mask(m):
+  if len(m) != 7:
+    raise Exception("invalid week day mask: \"%s\"" % m)
+  mask = 0
+  for i in range(0,7):
+    if m[i] != ".":
+      mask |= (1 << i)
+  return mask
 
 class Latch:
   "Threading helper class - single shot latch"
@@ -221,6 +268,10 @@ class MemoryBuffer:
   def __setitem__(self, idx, val):
     self.__rom[idx] = val
 
+  def setFromByteArray(self, idx, vals):
+    self.__rom[idx:idx+len(vals)] = vals
+    return idx + len(vals)
+
   def peek(self, idx):
     return self.__rom[idx]
 
@@ -258,35 +309,6 @@ class MemoryBuffer:
         emptyCount += 1
     return totalLength-emptyCount
 
-
-
-
-class XMLBuilder:
-  def __init__(self, treebuilder):
-    self.builder = treebuilder
-    self.stack = []
-  def start(self, tag, attribs = {}):
-    for k in attribs.keys():
-      attribs[k] = str(attribs[k])
-    self.builder.start(tag, attribs)
-    self.stack.append(tag)
-    return self
-  def end(self):
-    closeTag = self.stack.pop()
-    self.builder.end(closeTag)
-    return self
-  def data(self, dat):
-    self.builder.data(str(dat))
-    return self
-  def close(self):
-    while len(self.stack) > 0:
-      self.end()
-    return self.builder.close()
-  def tostring(self):
-    t = self.close()
-    mod = sys.modules[t.__module__]
-    return mod.tostring(t)
-
 if __name__ == "__main__":
 
   import unittest
@@ -309,11 +331,33 @@ if __name__ == "__main__":
 
     def testYearDayConversion(self):
       leap_year = 2004
-      self.assertEqual("2004-01-01", x10YearDayToString(1, leap_year))
-      self.assertEqual("2004-02-29", x10YearDayToString(60, leap_year))
-      self.assertEqual("2005-03-01", x10YearDayToString(60, leap_year+1))
-      self.assertEqual("2004-12-31", x10YearDayToString(366, leap_year))
-      self.assertEqual("2004-12-31", x10YearDayToString(367, leap_year))
+      self.assertEqual("2004-01-01", x10_year_day_to_string(1, leap_year))
+      self.assertEqual("2004-02-29", x10_year_day_to_string(60, leap_year))
+      self.assertEqual("2005-03-01", x10_year_day_to_string(60, leap_year+1))
+      self.assertEqual("2004-12-31", x10_year_day_to_string(366, leap_year))
+      self.assertRaises(Exception, lambda: x10_year_day_to_string(367, leap_year))
 
+    def testMaskToNumbers(self):
+      mask = 0x156 # 101010110
+      result = mask_to_numbers(mask)
+      self.assertEqual([8, 6, 4, 2, 1], result)
+      mask1 = numbers_to_mask(result)
+      self.assertEqual(mask, mask1)
+
+    def testWeekMask(self):
+      mask = 0x56 # 1010110
+      s = week_mask_to_string(mask)
+      self.assertEqual(".MT.T.S", s)
+      self.assertEqual(mask, string_to_week_mask(s))
+
+    def testMergeBytes(self):
+      self.assertEqual(0x1234abcd, merge_bytes([0x12, 0x34, 0xab, 0xcd]))
+
+    def testUnMergeBytes(self):
+      self.assertEqual([0x12, 0x34, 0xab, 0xcd], unmerge_bytes(0x1234abcd))
+
+    def testAligment(self):
+      self.assertEqual(16, alignToBoundary(17, -4))
+      self.assertEqual(21, alignToBoundary(18, 7))
 
   unittest.main()
