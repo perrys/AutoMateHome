@@ -36,55 +36,76 @@ class MacroInitiator:
   matching powerline event is received and the clauses are satisfied,
   the specified macro chain will be executed."""
 
-  def __init__(self, bytes, offset=0):
+  def __init__(self, data, clauses):
+    vars(self).update(data)
+    self.clauses = clauses
+    self.codelength = codec.MACRO_INITIATOR.codelength
+    for c in self.clauses:
+      self.codelength += c.codelength
+
+  @classmethod
+  def fromByteCode(cls, bytes, offset=0):
     """Create a macro initiator from bytecode. The code specifies the
     house/unit codes and zero or more clauses.
 
     The format of the bytecode is described by the MACRO_INITIATOR
     instance in the codec module."""
     
-    self.__dict__.update(codec.MACRO_INITIATOR.decode(bytes, offset))
-    self.house_code  = codec.VALUE_TO_HOUSECODE_MAP[self.house_code]
-    self.unit_code = codec.VALUE_TO_UNITCODE_MAP[self.unit_code]
+    data = codec.MACRO_INITIATOR.decode(bytes, offset)
 
-    self.clauses = []
-    for i in range(0, self.n_clauses):
+    clauses = []
+    for i in range(0, data["n_clauses"]):
       offset += 3
-      self.clauses.append(MacroInitiatorClause.create(bytes, offset))
-    self.codelength = 3 * self.n_clauses + 3
+      clauses.append(MacroInitiatorClause.fromByteCode(bytes, offset))
 
-  def __str__(self):
-    clauses = [("   ", str(c.__dict__)) for c in self.clauses]
-    data = [
-      [" house_code:", self.house_code],
-      [" unit code:",  self.unit_code],
-      [" trigger:",    self.trigger_on_off and "on" or "off"],
-      [" macro:",      "0x%04x" % self.macro_ptr],
-      [" clauses:",    "\n" + utils.formatTable(clauses)],
-      ]
-    return utils.formatTable(data)
+    return cls(data, clauses)
+
+  @classmethod
+  def fromJSON(cls, data):
+    clauses = [MacroInitiatorClause.fromJSON(c) for c in data["clauses"]]
+    data = codec.MACRO_INITIATOR.createDataMap(data)
+    return cls(data, clauses)
+    
+  def toByteCode(self):
+    bytes = codec.MACRO_INITIATOR.encode(vars(self))
+    for c in self.clauses:
+      bytes.extend(c.toByteCode())
+    return bytes
 
   def toJSON(self):
-    d = dict(self.__dict__)
-    del d["n_clauses"]
-    del d["codelength"]
-    if self.reserved == 0:
-      del d["reserved"]
+    d = dict()
+    utils.merge_dict_if_not_default(vars(self), d, "reserved", 0)
+    utils.merge_dict_if_not_default(vars(self), d, "clauses", None)
+    d["house_code"]  = codec.VALUE_TO_HOUSECODE_MAP[self.house_code]
+    d["unit_code"] = codec.VALUE_TO_UNITCODE_MAP[self.unit_code]
     d["trigger_on_off"] = self.trigger_on_off and "on" or "off"
-    utils.convertKeyToHexString(d, "macro_ptr")
+    d["macro_id"] = self.macro_ptr
+    utils.convert_key_to_hex_string(d, "macro_id")
     return d
 
-    # l = [self.house_code, self.unit_code, self.trigger_on_off and "on" or "off", "0x%04x" % self.macro_ptr]
-    # if self.reserved != 0:
-    #   l.append(self.reserved)
-    # l.append(self.clauses)
-    # return l
+class UnsuitableDataException(Exception):
+  pass
 
 class MacroInitiatorClause(object):
   """Base class for a clause in a macro initiator."""
 
   @staticmethod
-  def create(bytes, offset=0):
+  def fromJSON(data):
+    """Create a macro clause of the correct subtype"""
+
+    for cls in [MacroInitiatorClauseTimeType, 
+                MacroInitiatorClauseDateType, 
+                MacroInitiatorClauseDayType, 
+                MacroInitiatorClauseModulesType, 
+                MacroInitiatorClauseFlagsType]:
+      try:
+        return cls(data=data)
+      except UnsuitableDataException:
+        pass    
+    raise Exception("unable to create a macro clause from: %s" % data)
+
+  @staticmethod
+  def fromByteCode(bytes, offset=0):
     """Create a macro clause of the correct subtype"""
 
     # hack to avoid double read in debug mode:
@@ -104,21 +125,32 @@ class MacroInitiatorClause(object):
 
     return ctr(bytes, offset)
 
-  def __init__(self, bytes, offset=0):
+  def __init__(self, bytes=None, offset=0, data=None):
     """Base class constructor for the macro initiator clauses, which
     have a common header, described by the
     MACRO_INITIATOR_CLAUSE_HEADER instance in the codec
     module. Relevant data in the header are the logic op (i.e. "and"
     or "or") and the comparison op (less, greater, equal, not)."""
 
-    self.__dict__.update(codec.MACRO_INITIATOR_CLAUSE_HEADER.decode(bytes, offset))
-    self.logic_op = codec.MACRO_INITIATOR_HEADER_LOGIC_OPS[self.logic_op]
-    self.compare_op = codec.MACRO_INITIATOR_HEADER_COMPARE_OPS[self.compare_op]
+    if bytes is not None:
+      data = codec.MACRO_INITIATOR_CLAUSE_HEADER.decode(bytes, offset)
+    else:
+      assert(data is not None)
+      def substitueIndexOf(key, l):
+        data[key] = l.index(data[key])
+      substitueIndexOf("logic_op", codec.MACRO_INITIATOR_HEADER_LOGIC_OPS)
+      substitueIndexOf("compare_op", codec.MACRO_INITIATOR_HEADER_COMPARE_OPS)
+      data = codec.MACRO_INITIATOR_CLAUSE_HEADER.createDataMap(data)
+    vars(self).update(data)
+
+  def toByteCode(self):
+    return codec.MACRO_INITIATOR_CLAUSE_HEADER.encode(vars(self))
 
   def toJSON(self):
-    l = utils.mergeDict(vars(self), None, "compare_op", "logic_op")
-    utils.mergeDictIfNotDefault(vars(self), l, "hdr_reserved_1", 0)
-    utils.mergeDictIfNotDefault(vars(self), l, "hdr_reserved_2", 0)
+    l = {"logic_op": codec.MACRO_INITIATOR_HEADER_LOGIC_OPS[self.logic_op],
+         "compare_op": codec.MACRO_INITIATOR_HEADER_COMPARE_OPS[self.compare_op]}
+    utils.merge_dict_if_not_default(vars(self), l, "hdr_reserved_1", 0)
+    utils.merge_dict_if_not_default(vars(self), l, "hdr_reserved_2", 0)
     return l
 
 class MacroInitiatorClauseTimeType(MacroInitiatorClause):
@@ -127,12 +159,34 @@ class MacroInitiatorClauseTimeType(MacroInitiatorClause):
   codes for sunrise and sunset, which are obviously variable from day
   to day and depend on geographical location.""" 
 
-  def __init__(self, bytes, offset=0):
-    
-    super(self.__class__, self).__init__(bytes, offset)
-    vars(self).update(codec.MACRO_INITIATOR_CLAUSE_BODY_TIME_TYPE.decode(bytes, 1+offset))
-    self.time = utils.x10TimeToTime(self.double_hour, self.min)
+  def __init__(self, bytes=None, offset=0, data=None):
+    if bytes is not None:
+      super(self.__class__, self).__init__(bytes, offset)
+      data = codec.MACRO_INITIATOR_CLAUSE_BODY_TIME_TYPE.decode(bytes, 1+offset)
+    else:
+      data = dict(data)
+      super(self.__class__, self).__init__(data=data)
+      if "time" not in data:
+        raise UnsuitableDataException()
+      time = data.get("time")
+      if time.lower() == "sunrise":
+        data["is_variable"] = 1
+        data["sunrise"] = 1
+      elif time.lower() == "sunset":
+        data["is_variable"] = 1
+        data["sunset"] = 1
+      else:
+        (data["double_hour"], data["min"]) = utils.timespec_to_x10_time(time)
+      data = codec.MACRO_INITIATOR_CLAUSE_BODY_TIME_TYPE.createDataMap(data)
 
+    vars(self).update(data)
+    self.codelength = codec.MACRO_INITIATOR_CLAUSE_HEADER.codelength + codec.MACRO_INITIATOR_CLAUSE_BODY_TIME_TYPE.codelength
+
+  def toByteCode(self):
+    bytes = super(self.__class__, self).toByteCode()
+    bytes.extend(codec.MACRO_INITIATOR_CLAUSE_BODY_TIME_TYPE.encode(vars(self)))
+    return bytes
+                 
   def toJSON(self):
     l = super(self.__class__, self).toJSON()
     time = None
@@ -142,9 +196,9 @@ class MacroInitiatorClauseTimeType(MacroInitiatorClause):
       else:
         time = "Sunset"
     else:
-      time = self.time.strftime("%H:%M")
+      time = utils.x10_time_to_string(self.double_hour, self.min)
     l["time"] = time
-    utils.mergeDictIfNotDefault(vars(self), l, "reserved", 0)
+    utils.merge_dict_if_not_default(vars(self), l, "reserved", 0)
     return l
 
 class MacroInitiatorClauseDateType(MacroInitiatorClause):
@@ -153,56 +207,118 @@ class MacroInitiatorClauseDateType(MacroInitiatorClause):
   year day is converted to a date for display/readability but this
   will be different for dates after 28th February on yeap years."""
 
-  def __init__(self, bytes, offset=0):
-    super(self.__class__, self).__init__(bytes, offset)
-    self.__dict__.update(codec.MACRO_INITIATOR_CLAUSE_BODY_DATE_TYPE.decode(bytes, 1+offset))
-    timeStr = "%(year_day)d" % self.__dict__
-    self.date = datetime.datetime.strptime(timeStr, "%j").date()
+  def __init__(self, bytes=None, offset=0, data=None):
+    if bytes is not None:
+      super(self.__class__, self).__init__(bytes, offset)
+      data = codec.MACRO_INITIATOR_CLAUSE_BODY_DATE_TYPE.decode(bytes, 1+offset)
+    else:
+      data = dict(data)
+      super(self.__class__, self).__init__(data=data)
+      if "year_day" not in data:
+        if "date" in data:
+          data["year_day"] = utils.datestring_to_x10_year_day(data["date"])
+        else:
+          raise UnsuitableDataException()
+      data = codec.MACRO_INITIATOR_CLAUSE_BODY_DATE_TYPE.createDataMap(data)
+    vars(self).update(data)
+    self.codelength = codec.MACRO_INITIATOR_CLAUSE_HEADER.codelength + codec.MACRO_INITIATOR_CLAUSE_BODY_DATE_TYPE.codelength
+      
+  def toByteCode(self):
+    bytes = super(self.__class__, self).toByteCode()
+    bytes.extend(codec.MACRO_INITIATOR_CLAUSE_BODY_DATE_TYPE.encode(vars(self)))
+    return bytes
 
   def toJSON(self):
     l = super(self.__class__, self).toJSON()
-    utils.mergeDictIfNotDefault(vars(self), l, "year_day", None)
-    l["date_display"] = utils.x10YearDayToString(self.year_day)
-    utils.mergeDictIfNotDefault(vars(self), l, "reserved", 0)
+    utils.merge_dict_if_not_default(vars(self), l, "year_day", None)
+    l["date"] = utils.x10_year_day_to_string(self.year_day)
+    utils.merge_dict_if_not_default(vars(self), l, "reserved", 0)
     return l
 
 class MacroInitiatorClauseDayType(MacroInitiatorClause):
   """Clause specifying one or more days of the week. Only the "equals"
   and "not" comparison operators are valid for this type of clause."""
-  def __init__(self, bytes, offset=0):
-    super(self.__class__, self).__init__(bytes, offset)
-    self.__dict__.update(codec.MACRO_INITIATOR_CLAUSE_BODY_DAY_TYPE.decode(bytes, 1+offset))
-    self.week_day_mask_display = utils.formatWeekMask(self.week_day_mask)
+
+  def __init__(self, bytes=None, offset=0, data=None):
+    if bytes is not None:
+      super(self.__class__, self).__init__(bytes, offset)
+      data = codec.MACRO_INITIATOR_CLAUSE_BODY_DAY_TYPE.decode(bytes, 1+offset)
+    else:
+      data = dict(data)
+      if "week_day_mask" not in data:
+        raise UnsuitableDataException()
+      data["week_day_mask"] = utils.string_to_week_mask(data["week_day_mask"])
+      data = codec.MACRO_INITIATOR_CLAUSE_BODY_DAY_TYPE.createDataMap(data)
+    vars(self).update(data)
+    self.codelength = codec.MACRO_INITIATOR_CLAUSE_HEADER.codelength + codec.MACRO_INITIATOR_CLAUSE_BODY_DAY_TYPE.codelength
+
+  def toByteCode(self):
+    bytes = super(self.__class__, self).toByteCode()
+    bytes.extend(codec.MACRO_INITIATOR_CLAUSE_BODY_DAY_TYPE.encode(vars(self)))
+    return bytes
 
   def toJSON(self):
     l = super(self.__class__, self).toJSON()
-    utils.mergeDictIfNotDefault(vars(self), l, "week_day_mask_display", None)
-    utils.mergeDictIfNotDefault(vars(self), l, "reserved_1", 0)
-    utils.mergeDictIfNotDefault(vars(self), l, "reserved_2", 0)
+    l["week_day_mask"] = utils.week_mask_to_string(self.week_day_mask)
+    utils.merge_dict_if_not_default(vars(self), l, "reserved_1", 0)
+    utils.merge_dict_if_not_default(vars(self), l, "reserved_2", 0)
     return l
 
 class MacroInitiatorClauseFlagsType(MacroInitiatorClause):
-  def __init__(self, bytes, offset=0):
-    super(self.__class__, self).__init__(bytes, offset)
-    mask = 0x100 * bytes[1+offset] + bytes[2+offset]
-    self.flags = [i for i in range(15, -1, -1) if (1 & mask >> i)]
+  def __init__(self, bytes=None, offset=0, data=None):
+    if bytes is not None:
+      super(self.__class__, self).__init__(bytes, offset)
+      mask = 0x100 * bytes[1+offset] + bytes[2+offset]
+      self.flags = [i for i in range(15, -1, -1) if (1 & mask >> i)]
+    else:
+      if "flags" not in data or "criteria" not in data:
+        raise UnsuitableDataException()
+      if data["criteria"].lower() == "on":
+        data["type"] = CLAUSE_TYPE_FLAGS_ON
+      else:
+        data["type"] = CLAUSE_TYPE_FLAGS_OFF
+      vars(self).update(data)
+    self.codelength = codec.MACRO_INITIATOR_CLAUSE_HEADER.codelength + 2
 
+  def toByteCode(self):
+    bytes = super(self.__class__, self).toByteCode()
+    flagmask = utils.unmerge_bytes(utils.numbers_to_mask(self.flags), 2)
+    bytes.extend(flagmask)
+    return bytes
+                  
   def toJSON(self):
     l = super(self.__class__, self).toJSON()
     l["criteria"] = self.type == CLAUSE_TYPE_FLAGS_ON and "on" or "off"
-    utils.mergeDictIfNotDefault(vars(self), l, "flags", None)
+    utils.merge_dict_if_not_default(vars(self), l, "flags", None)
     return l
 
 class MacroInitiatorClauseModulesType(MacroInitiatorClause):
-  def __init__(self, bytes, ptr=None):
-    super(self.__class__, self).__init__(bytes, offset)
-    mask = 0x100 * bytes[1] + bytes[2]
-    self.modules = [codec.UNITCODE_TO_VALUE_MAP[i] for i in range(15, -1, -1) if (1 & (mask >> i))]
+  def __init__(self, bytes=None, offset=0, data=None):
+    if bytes is not None:
+      super(self.__class__, self).__init__(bytes, offset)
+      mask = 0x100 * bytes[1] + bytes[2]
+      self.modules = [codec.UNITCODE_TO_VALUE_MAP[i] for i in range(15, -1, -1) if (1 & (mask >> i))]
+    else:
+      if "modules" not in data or "criteria" not in data:
+        raise UnsuitableDataException()
+      if data["criteria"].lower() == "on":
+        data["type"] = CLAUSE_TYPE_MODULES_ON
+      else:
+        data["type"] = CLAUSE_TYPE_MODULES_OFF
+      vars(self).update(data)
+    self.codelength = codec.MACRO_INITIATOR_CLAUSE_HEADER.codelength + 2
 
+  def toByteCode(self):
+    bytes = super(self.__class__, self).toByteCode()
+    coded_modules = [codec.VALUE_TO_UNITCODE_MAP[i] for i in self.modules]
+    modmask = utils.unmerge_bytes(utils.numbers_to_mask(coded_modules), 2)
+    bytes.extend(modmask)
+    return bytes
+                  
   def toJSON(self):
     l = super(self.__class__, self).toJSON()
     l["Criteria"] = self.type == CLAUSE_TYPE_MODULES_ON and "on" or "off"
-    utils.mergeDictIfNotDefault(vars(self), l, "modules", None)
+    utils.merge_dict_if_not_default(vars(self), l, "modules", None)
 
 CLAUSE_TYPE_DISPLATCH_TABLE = {
   CLAUSE_TYPE_TIME        : MacroInitiatorClauseTimeType,
@@ -225,24 +341,49 @@ class TimerInitiator:
   associated with them (start and stop).
   """
 
-  def __init__(self, bytes, offset=0):
-    """Create a timer initiator from bytecode."""
-    vars(self).update(codec.TIMER_INITIATOR.decode(bytes, offset))
+  def __init__(self, data):
+    vars(self).update(data)
     self.codelength = codec.TIMER_INITIATOR.codelength
+
+  @classmethod
+  def fromByteCode(cls, bytes, offset=0):
+    """Create a timer initiator from bytecode."""
+    return cls(codec.TIMER_INITIATOR.decode(bytes, offset))
+
+  def toByteCode(self):
+    return codec.TIMER_INITIATOR.encode(vars(self))
+
+  @classmethod
+  def fromJSON(cls, data):
+    """Create a timer initiator from a JSON-decoded struture."""
+    if "begin_year_day" not in data and "begin_date" in data:
+      data["begin_year_day"] = utils.datestring_to_x10_year_day(data["begin_date"])
+    if "end_year_day" not in data and "end_date" in data:
+      data["end_year_day"] = utils.datestring_to_x10_year_day(data["end_date"])
+    def setTimes(key):
+      timeSpec = data.get("%(key)s_time" % locals())
+      # TODO: test null start/stop times
+      if timeSpec is not None:
+        data["%(key)s_double_hour" % locals()], data["%(key)s_min" % locals()] = utils.timespec_to_x10_time(timeSpec, True)
+    setTimes("start")
+    setTimes("stop")
+    data["week_day_mask"] = utils.string_to_week_mask(data["week_day_mask"])
+          
+    return cls(codec.TIMER_INITIATOR.createDataMap(data))
 
   def toJSON(self):
     t = vars(self)
-    tijson = utils.mergeDict(t, None, "start_macro_ptr", "stop_macro_ptr", "start_macro_id", "stop_macro_id")
-    utils.convertKeyToHexString(tijson, "start_macro_ptr", "stop_macro_ptr", "start_macro_id", "stop_macro_id")
-    if utils.mergeDictIfNotDefault(t, tijson, "begin_year_day", 0):
-      tijson["start_date_display"] = utils.x10YearDayToString(t["begin_year_day"])
-    if utils.mergeDictIfNotDefault(t, tijson, "end_year_day", 367):
-      tijson["stop_date_display"] = utils.x10YearDayToString(t["end_year_day"])
-    utils.mergeDictIfNotDefault(t, tijson, "start_security", 0)
-    utils.mergeDictIfNotDefault(t, tijson, "stop_security", 0)
-    tijson["start_time"] = utils.x10TimeToString(t["start_double_hour"], t["start_min"])
-    tijson["stop_time"] = utils.x10TimeToString(t["stop_double_hour"], t["stop_min"])
-    tijson["week_day_mask"] = utils.formatWeekMask(t["week_day_mask"])
+    tijson = utils.merge_dict(t, None, "start_macro_ptr", "stop_macro_ptr", "start_macro_id", "stop_macro_id")
+    utils.convert_key_to_hex_string(tijson, "start_macro_ptr", "stop_macro_ptr", "start_macro_id", "stop_macro_id")
+    if utils.merge_dict_if_not_default(t, tijson, "begin_year_day", 0):
+      tijson["begin_date"] = utils.x10_year_day_to_string(t["begin_year_day"])
+    if utils.merge_dict_if_not_default(t, tijson, "end_year_day", 367):
+      tijson["end_date"] = utils.x10_year_day_to_string(t["end_year_day"])
+    utils.merge_dict_if_not_default(t, tijson, "start_security", 0)
+    utils.merge_dict_if_not_default(t, tijson, "stop_security", 0)
+    tijson["start_time"] = utils.x10_time_to_string(t["start_double_hour"], t["start_min"])
+    tijson["stop_time"] = utils.x10_time_to_string(t["stop_double_hour"], t["stop_min"])
+    tijson["week_day_mask"] = utils.week_mask_to_string(t["week_day_mask"])
     return tijson
 
                       
@@ -250,45 +391,118 @@ class TimerInitiator:
 class MacroChain:
   """A set of macros to be executed in response to either a macro initiator or a timer initiator."""
 
-  def __init__(self, bytes, offset=0):
-    self.id = offset
+  def __init__(self, data):
+    vars(self).update(data)
+
+  @classmethod
+  def fromByteCode(cls, bytes, offset=0):
+    data = dict()
+    data["id"] = offset
     offset += 1
-    self.__dict__.update(codec.MACRO_HEADER.decode(bytes, offset))
-    offset += codec.MACRO_HEADER.codelength
-    self.elements = []
-    for i in range(0, self.n_elements):
+    data.update(codec.MACRO_CHAIN_HEADER.decode(bytes, offset))
+    offset += codec.MACRO_CHAIN_HEADER.codelength
+    data["elements"] = []
+    for i in range(0, data["n_elements"]):
       d = codec.MACRO_COMMON.decode(bytes, offset)
+      data["elements"].append(d)
+      offset += codec.MACRO_COMMON.codelength
+      func = d["function_code"]
+      if func == codec.UNDERSCORED_LOWERCASE_FUNCTION_TO_CODE_MAP["dim"] or \
+            func == codec.UNDERSCORED_LOWERCASE_FUNCTION_TO_CODE_MAP["bright"]:
+        d.update(codec.MACRO_BRIGHT_DIM_SUFFIX.decode(bytes, offset))
+        offset += codec.MACRO_BRIGHT_DIM_SUFFIX.codelength
+      elif func == codec.UNDERSCORED_LOWERCASE_FUNCTION_TO_CODE_MAP["extended_command"]:
+        d.update(codec.MACRO_EXTENDED_CMD_SUFFIX.decode(bytes, offset))
+        offset += codec.MACRO_EXTENDED_CMD_SUFFIX.codelength
+    return cls(data)
+
+  def toByteCode(self):
+    bytes = codec.MACRO_CHAIN_HEADER.encode(vars(self))
+    for d in self.elements:
+      bytes.extend(codec.MACRO_COMMON.encode(d))
+      func = d["function_code"]
+      if func == codec.UNDERSCORED_LOWERCASE_FUNCTION_TO_CODE_MAP["dim"] or \
+            func == codec.UNDERSCORED_LOWERCASE_FUNCTION_TO_CODE_MAP["bright"]:
+        bytes.extend(codec.MACRO_BRIGHT_DIM_SUFFIX.encode(d))
+      elif func == codec.UNDERSCORED_LOWERCASE_FUNCTION_TO_CODE_MAP["extended_command"]:
+        bytes.extend(codec.MACRO_EXTENDED_CMD_SUFFIX.encode(d))
+    return bytes
+
+  @classmethod
+  def fromJSON(cls, jsondata):
+    data = codec.MACRO_CHAIN_HEADER.createDataMap(jsondata)
+    data["id"] = int(jsondata["id"], 16)
+    elements = data["elements"] = []
+    for e in jsondata["elements"]:
+      elements.append(e)
+      maskMap = codec.DEVICECODE_MASK.createDataMap()
+      for u in e["units"]:
+        maskMap[u] = 1
+      e["unit_bitmap_hi"], e["unit_bitmap_lo"] = codec.DEVICECODE_MASK.encode(maskMap)
+      e["function_code"] = codec.UNDERSCORED_LOWERCASE_FUNCTION_TO_CODE_MAP[e["function_code"].replace(" ","_").lower()]
+      e["house_code"] = codec.HOUSECODE_TO_VALUE_MAP[e["house_code"]]
+    return cls(data)
+
+  def toJSON(self):
+    l = utils.merge_dict(vars(self), None, "delay_secs", "id")
+    utils.convert_key_to_hex_string(l, "id")
+#    l["reserved"] = utils.to_binary_string(self.reserved_1)
+    elements = l["elements"] = []
+    for d in self.elements:
       units = d["unit_bitmap_hi"], d["unit_bitmap_lo"]
       d["units"] = [k for k,v in codec.DEVICECODE_MASK.decode(units).iteritems() if v == 1]
       del d["unit_bitmap_lo"]
       del d["unit_bitmap_hi"]
       d["function_code"] = codec.FUNCTIONS_ZERO_OFFSET[d["function_code"]]
       d["house_code"] = codec.VALUE_TO_HOUSECODE_MAP[d["house_code"]]
-      self.elements.append(d)
-      offset += codec.MACRO_COMMON.codelength
-      func = d["function_code"]
-      if func == codec.UNDERSCORED_LOWERCASE_FUNCTION_TO_CODE_MAP["dim"] or \
-            func == codec.UNDERSCORED_LOWERCASE_FUNCTION_TO_CODE_MAP["bright"]:
-        d.update(codec.MACRO_BRIGHT_DIM_SUFFIX.decode(bytes, offset))
-        offset += MACRO_BRIGHT_DIM_SUFFIX.codelength
-      elif func == codec.UNDERSCORED_LOWERCASE_FUNCTION_TO_CODE_MAP["extended_command"]:
-        d.update(codec.MACRO_EXTENDED_CMD_SUFFIX.decode(bytes, offset))
-        offset += MACRO_EXTENDED_CMD_SUFFIX.codelength
-
-  def toJSON(self):
-    l = utils.mergeDict(vars(self), None, "delay_secs", "elements", "id")
-    utils.convertKeyToHexString(l, "id")
-    l["reserved"] = utils.to_binary_string(self.reserved_1)
+      elements.append(d)
     return l
 
 
 class EEPROM:
 
-  def __init__(self, memoryBuffer):
-    self.total_length = len(memoryBuffer)
-    self.used = memoryBuffer.used()
-    self.macro_initiator_table_offset = utils.merge_bytes(memoryBuffer[0:2])
-    self.sunrise_sunset_table_offset = utils.merge_bytes(memoryBuffer[2:4])
+  def __init__(self, data):
+    vars(self).update(data)
+
+  def toJSON(self):
+    d = utils.merge_dict(vars(self), None)
+    d["dst_data"]["begin_date"] = utils.x10_year_day_to_string(self.dst_data["begin_year_day"])
+    d["dst_data"]["end_date"] = utils.x10_year_day_to_string(self.dst_data["end_year_day"])
+    def processDawnDusk(l):
+      da = {"rise": utils.x10_time_to_string(l["start_double_hour"], l["start_min"]), \
+                              "set": utils.x10_time_to_string(l["stop_double_hour"], l["stop_min"])}
+      utils.merge_dict_if_not_default(l, da, "reserved_1", 0)
+      utils.merge_dict_if_not_default(l, da, "reserved_2", 0)
+      return da
+    sunrise_sunset_list = [processDawnDusk(l) for l in d["sunrise_sunset_times"]]
+    d["sunrise_sunset_times"] = sunrise_sunset_list
+    return d
+
+  @classmethod
+  def fromJSON(cls, jsonData):
+    data = dict()
+    utils.merge_dict_if_not_default(jsonData, data, "dst_data", None)
+    def processArray(key, clz):
+      data[key] = [clz.fromJSON(m) for m in jsonData[key]]
+    processArray("macro_chains", MacroChain)
+    processArray("macro_initiators", MacroInitiator)
+    processArray("timer_initiators", TimerInitiator)
+    def processDawnDusk(l):
+      d = codec.DAWN_DUSK_ENTRY.createDataMap()
+      utils.merge_dict_if_not_default(l, d, "reserved_1", 0)
+      utils.merge_dict_if_not_default(l, d, "reserved_2", 0)
+      d["start_double_hour"], d["start_min"] = utils.timespec_to_x10_time(l["rise"])
+      d["stop_double_hour"],  d["stop_min"]  = utils.timespec_to_x10_time(l["set"])
+      return d
+    data["sunrise_sunset_times"] = [processDawnDusk(l) for l in jsonData["sunrise_sunset_times"]]
+    return cls(data)
+
+  @classmethod
+  def fromByteCode(cls, memoryBuffer):
+    macro_initiator_table_offset = utils.merge_bytes(memoryBuffer[0:2])
+    sunrise_sunset_table_offset = utils.merge_bytes(memoryBuffer[2:4])
+
+    self = cls(dict())
     self.sunrise_sunset_resolution = memoryBuffer[4]
     self.dst_data = codec.DST_DAYS.decode(memoryBuffer, 5)
     tranceivedHousecodes = codec.HOUSECODE_MASK.decode(memoryBuffer, 9)
@@ -297,8 +511,8 @@ class EEPROM:
 
     ptr = 0x19
     first_indirect_ptr = 0xffff
-    while (self.macro_initiator_table_offset - ptr) > codec.TIMER_INITIATOR.codelength:
-      t = TimerInitiator(memoryBuffer, ptr)
+    while (macro_initiator_table_offset - ptr) > codec.TIMER_INITIATOR.codelength:
+      t = TimerInitiator.fromByteCode(memoryBuffer, ptr)
       self.timer_initiators.append(t)
       for p in t.start_macro_ptr, t.stop_macro_ptr:
         if p > 0:
@@ -308,17 +522,17 @@ class EEPROM:
       if (first_indirect_ptr - ptr) < codec.TIMER_INITIATOR.codelength: 
         break
 
-    ptr = self.macro_initiator_table_offset+1
+    ptr = macro_initiator_table_offset+1
     self.macro_initiators = []
     while memoryBuffer.peek(ptr+2) != 0xff:
-      mi = MacroInitiator(memoryBuffer, ptr)
+      mi = MacroInitiator.fromByteCode(memoryBuffer, ptr)
       self.macro_initiators.append(mi)
       ptr += mi.codelength
       ptr += 1
       
     self.macro_chains = []
     for m in self.macro_initiators:
-      self.macro_chains.append(MacroChain(memoryBuffer, m.macro_ptr))
+      self.macro_chains.append(MacroChain.fromByteCode(memoryBuffer, m.macro_ptr))
 
     recorded_indirects = {}
     recorded_macros = {}
@@ -333,19 +547,19 @@ class EEPROM:
         return indirect_ptr
       return None
 
-    for t in self.timer_initiators:
+    for i,t in enumerate(self.timer_initiators):
       for k in ["start_macro_ptr", "stop_macro_ptr"]:
         m_ptr = getMacroFromIndirect(vars(t)[k])
         if m_ptr is not None:
           vars(t)[k.replace("_ptr", "_id")] = m_ptr
           m = recorded_macros.get(m_ptr)
           if m is None:
-            m = MacroChain(memoryBuffer, m_ptr)
+            m = MacroChain.fromByteCode(memoryBuffer, m_ptr)
             recorded_macros[m_ptr] = m
             self.macro_chains.append(m)
 
     end_day = 0
-    ptr = self.sunrise_sunset_table_offset
+    ptr = sunrise_sunset_table_offset
     self.sunrise_sunset_times = []
     while end_day < 366 :
       sunrise_sunset_time = codec.DAWN_DUSK_ENTRY.decode(memoryBuffer, ptr)
@@ -353,81 +567,119 @@ class EEPROM:
       ptr += codec.DAWN_DUSK_ENTRY.codelength
       end_day += self.sunrise_sunset_resolution
 
-  def toJSON(self):
-    d = utils.mergeDict(vars(self), None)
-    tis = d["timer_initiators"] = []
-    for timer in self.timer_initiators:
-      t = vars(timer)
-      tijson = utils.mergeDict(t, None, "start_macro_ptr", "stop_macro_ptr", "start_macro_id", "stop_macro_id")
-      utils.convertKeyToHexString(tijson, "start_macro_ptr", "stop_macro_ptr", "start_macro_id", "stop_macro_id")
-      if utils.mergeDictIfNotDefault(t, tijson, "begin_year_day", 0):
-        tijson["start_date_display"] = utils.x10YearDayToString(t["begin_year_day"])
-      if utils.mergeDictIfNotDefault(t, tijson, "end_year_day", 367):
-        tijson["stop_date_display"] = utils.x10YearDayToString(t["end_year_day"])
-      utils.mergeDictIfNotDefault(t, tijson, "start_security", 0)
-      utils.mergeDictIfNotDefault(t, tijson, "stop_security", 0)
-      tijson["start_time"] = utils.x10TimeToString(t["start_double_hour"], t["start_min"])
-      tijson["stop_time"] = utils.x10TimeToString(t["stop_double_hour"], t["stop_min"])
-      tijson["week_day_mask"] = utils.formatWeekMask(t["week_day_mask"])
-      tis.append(tijson)
-    d["dst_data"]["start_date_display"] = utils.x10YearDayToString(self.dst_data["begin_year_day"])
-    d["dst_data"]["stop_date_display"] = utils.x10YearDayToString(self.dst_data["end_year_day"])
-    sunrise_sunset_list = [{"rise": utils.x10TimeToString(l["start_double_hour"], l["start_min"]), "set": utils.x10TimeToString(l["stop_double_hour"], l["stop_min"])} \
-                             for l in d["sunrise_sunset_times"]]
-    d["sunrise_sunset_times"] = sunrise_sunset_list
+    return self
+
+  def toByteCode(self):
+    """Convert the timers, macro initiators, macros, DST data,
+    sunrise/sunset data and everything else described by this class
+    into bytecode suitable for uploading to the CM15."""
+    mem = utils.MemoryBuffer(capacity=0x2000)
+
+    assert(0 == (self.sunrise_sunset_resolution >> 8))
+    mem[4] = self.sunrise_sunset_resolution & 0xFF
     
-    del d["sunrise_sunset_table_offset"]
-    del d["macro_initiator_table_offset"]
-    del d["used"]
-    del d["total_length"]
-    return d
+    bytes = codec.DST_DAYS.encode(self.dst_data)
+    mem.setFromByteArray(5, bytes)
 
-  def describe(self):
+    tranceivedHousecodeMap = dict([(k, 1) for k in self.tranceivedHousecodes])
+    for i in range(0,16):
+      c = chr(ord('A')+i)
+      if c not in tranceivedHousecodeMap:
+        tranceivedHousecodeMap[c] = 0
+    mem.setFromByteArray(9, codec.HOUSECODE_MASK.encode(tranceivedHousecodeMap))
 
-    data = [["Memory Used:", "%d%% (%d bytes)" % (100*self.used/self.total_length, self.used) ]]
+    # TODO: data between 0x0b and 0x18 not currently understood
 
-    data.append(["Macro Initiator Offset:", "0x%(macro_initiator_table_offset)04x" % self.__dict__])
-    data.append(["Dawn/Dusk Table Offset:", "0x%(sunrise_sunset_table_offset)04x" % self.__dict__])
-    data.append(["Dawn/Dusk Resolution:", "%(sunrise_sunset_resolution)d day(s)" % self.__dict__])
+    ptr = 0x18
 
-    data.append(["DST start day:", "%(begin_year_day)d" % self.dst_data])
-    data.append(["DST end day:", "%(end_year_day)d" % self.dst_data])
+    # the eeprom download seems to contain a lot of single bytes holding
+    # the least-significant 8 bits of their address. Presumably this
+    # was just a default value fill of the buffer, although these
+    # markers do make the rom code a bit easier for a human to read 
+    def setLowOrderAddressByte():
+      mem[ptr] = ptr & 0xFF
+      return ptr + 1
+    
+    ptr = setLowOrderAddressByte()
 
-    data.append(["Trancieved Housecode(s):", ", ".join(self.tranceivedHousecodes)])
+    # write the timer initiators. Timers refer to start and stop macro
+    # chains, but the addresses of the macros are indirected through a
+    # set of 2-byte pointers stored in memory after the timer
+    # initiators. My guess is that this is to get around the 10-bit
+    # address limitation of the codec, as this scheme allows macros to
+    # be placed anywhere in the 16-bit address space while also
+    # allowing much of the original eeprom hardware from the CM12 to
+    # be reused.
+    indirect_table = dict()
+    indirect_table_offset = ptr + (len(self.timer_initiators) * codec.TIMER_INITIATOR.codelength)
+    indirect_table_offset = utils.alignToBoundary(indirect_table_offset, 4)
+    for t in self.timer_initiators:
+      hasMacroId = False
+      for k in ("start_macro_id", "stop_macro_id"):
+        if k in vars(t):
+          hasMacroId = True
+          id = vars(t)[k]
+          indirectPtr = indirect_table.get(id)
+          if indirectPtr is None:
+            offset = indirect_table_offset + (2 * len(indirect_table))
+            indirectPtr = indirect_table[id] = offset
+          t.start_macro_ptr = indirectPtr
+      assert(hasMacroId)
+      bytes = t.toByteCode()
+      ptr = mem.setFromByteArray(ptr, bytes)
+      ptr = setLowOrderAddressByte()
 
-    for j,t in enumerate(self.timer_initiators):
-      r = [[" ", "\n"],
-           [" days of week:", utils.formatWeekMask(t["week_day_mask"])],
-           [" start DOY:", t["begin_year_day"]],
-           [" stop  DOY:", t["end_year_day"]],
-           [" start time:", utils.x10TimeToTime(t["start_double_hour"], t["start_min"])],
-           [" stop  time:", utils.x10TimeToTime(t["stop_double_hour"], t["stop_min"])],
-           [" randomize start:", t["start_security"] and "Y" or "N"],
-           [" randomize stop:",  t["stop_security"]  and "Y" or "N"],
-           [" start macro:", "0x%04x" % t["start_macro_ptr"]],
-           [" stop macro:", "0x%04x" % t["stop_macro_ptr"]],
-           ]
-      data.append(["Timer %d:" % (j+1), utils.formatTable(r)])
-      if utils.x10TimeToTime(t["start_double_hour"], t["start_min"]) is not None:
-        mptr = t["start_macro_ptr"]
-      if utils.x10TimeToTime(t["stop_double_hour"], t["stop_min"]) is not None:
-        mptr = t["stop_macro_ptr"]
+    # A few bytes here which are not well understood - seems to
+    # contain address boundary of the macros:
+    ptr = mem.setFromByteArray(ptr, [0x00])
+    ptr = setLowOrderAddressByte()
+    macro_limits_offset = ptr # need to  write the macro end address here 
+    ptr += 2 
 
-    for j,m in enumerate(self.macroInitiators):
-      r = [[" ", "\n"],
-           [" house_code:", codec.VALUE_TO_HOUSECODE_MAP[m["house_code"]]],
-           [" unit code:",  codec.VALUE_TO_UNITCODE_MAP[m["unit_code"]]],
-           [" trigger:",    m["trigger_on_off"] and "on" or "off"],
-           [" macro:", "0x%04x" % m["macro_ptr"]],
-           [" n_clauses:", m["n_clauses"]],
-           [" reserved:", utils.to_binary_string(m["reserved"])],
-           [" extrabytes:", " ".join([utils.bytes_to_printed_bytes(x) for x in m["extrabytes"]])],
-           ]
-      data.append(["Trigger %d:" % (j+1), utils.formatTable(r)])
-      data.append(["Trigger %d:" % (j+1), "\n" + json.dumps(m, cls=utils.JSONEncoder, sort_keys=True,
-                  indent=4, separators=(',', ': '))])
-      
-    return utils.formatTable(data)
+    # now set the offset at the start of the eeprom
+    macro_initiator_table_offset = ptr + (3 * len(indirect_table))
+    mem.setFromByteArray(0, utils.unmerge_bytes(macro_initiator_table_offset, 2))
+   
+    # write the macro initiators:
+    ptr = macro_initiator_table_offset
+    for m in self.macro_initiators:
+      ptr = setLowOrderAddressByte()
+      ptr = mem.setFromByteArray(ptr, m.toByteCode())
+
+    ptr = setLowOrderAddressByte()
+    ptr = mem.setFromByteArray(ptr, [0xff, 0xff, 0xff])
+
+    # now write the actual macro chains:
+    for m in self.macro_chains:
+      ptr = setLowOrderAddressByte()
+      ptr = mem.setFromByteArray(ptr, m.toByteCode())
+
+    # go back and write the end address:
+    end_of_macros_address = ptr    
+    mem.setFromByteArray(macro_limits_offset, utils.unmerge_bytes(end_of_macros_address, 2))
+
+    ptr = setLowOrderAddressByte()
+    ptr = mem.setFromByteArray(ptr, [0x00])
+
+    # fill the rest of this row and the next with 0xffs:
+    fill_address = utils.alignToBoundary(ptr, 16)
+    fill_address += 16
+    ptr = mem.setFromByteArray(ptr, [0xff for i in range(ptr, fill_address)])
+
+    # now write the sunrise/sunset times:
+    ptr = len(mem) - 12
+    for sunrise_sunset_time in reversed(self.sunrise_sunset_times):
+      ptr -= codec.DAWN_DUSK_ENTRY.codelength
+      mem.setFromByteArray(ptr, codec.DAWN_DUSK_ENTRY.encode(sunrise_sunset_time))
+
+    # write this offset into byte 2:
+    start_of_sunrise_sunset_table = ptr
+    mem.setFromByteArray(2, utils.unmerge_bytes(start_of_sunrise_sunset_table, 2))
+
+    # TODO: 12 bytes at the end of the eeprom not currently understood
+
+    return mem
+
 
 def createFromUSBMONDump(fh):
   rom = utils.MemoryBuffer()
@@ -455,13 +707,21 @@ if __name__ == "__main__":
 #  origrom.dump(sys.stdout)
 
   mem = utils.MemoryBuffer(origrom, True)
-  rom = EEPROM(mem)
+  rom = EEPROM.fromByteCode(mem)
 #  print rom.describe()
-  print json.dumps(rom, cls=utils.JSONEncoder, sort_keys=True,
+  s = json.dumps(rom, cls=utils.JSONEncoder, sort_keys=True,
                    indent=2, separators=(',', ': '))
+  print s
+  jdata = json.loads(s)
+  rom2 = EEPROM.fromJSON(jdata)
+  s2 = json.dumps(rom2, cls=utils.JSONEncoder, sort_keys=True,
+                   indent=2, separators=(',', ': '))
+  print s2
+
+#  rom.toByteCode().dump(sys.stdout)
 
   # unreadRanges = mem.describeUnread()
   # print unreadRanges
   # for (low, high) in unreadRanges:
   #   print "0x%04x - 0x%04x" % (low, high)
-  # mem.dump(sys.stdout)
+#  mem.dump(sys.stdout)
