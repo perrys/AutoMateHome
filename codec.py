@@ -40,6 +40,16 @@ class codec:
         codelength = max(l1[0]+1, codelength)
     self.codelength = codelength
 
+  def createDataMap(self, src=dict(), defaultValue=0):
+    """Create a data map from data in SRC, using DEFAULT as the value for missing attributes."""
+    result = dict(self.mapping)
+    for k in result.iterkeys():
+      if k in src:
+        result[k] = src[k]
+      else:
+        result[k] = defaultValue
+    return result
+
   def decode(self, data, offset=0):
 
     if offset > 0:
@@ -159,7 +169,7 @@ DEVICE_CLOCK = codec({
 # timezones in 2013
 DST_DAYS = codec({
     "begin_year_day"  : [(1, 7, 8, 7), (0, 7, 1, 8)],
-    "end_year_day"   : [(3, 7, 8, 7), (2, 7, 1, 8)],
+    "end_year_day"    : [(3, 7, 8, 7), (2, 7, 1, 8)],
     "reserved_1"      : [(0, 6, 7, 6)],
     "reserved_2"      : [(2, 6, 7, 6)]
     })
@@ -216,11 +226,15 @@ DAWN_DUSK_ENTRY = codec({
     "reserved_2"        : [(2, 7, 1, 0)]
     })
 
+# Timer initiator, similar (identical?) to that specified in
+# protocol.txt. Note that the macro addresses are only 10 bits wide,
+# so in the CM15 these actually point to an address close to the start
+# of the eeprom which contains the real macro address
 TIMER_INITIATOR = codec({
     "reserved_1":          [(0, 7, 1, 0)],
     "week_day_mask":       [(0, 6, 7, 6)],
     "begin_year_day":      [(1, 7, 8, 7), (4, 7, 1, 8)],
-    "end_year_day":       [(2, 7, 8, 7), (5, 7, 1, 8)],
+    "end_year_day":        [(2, 7, 8, 7), (5, 7, 1, 8)],
     "start_double_hour":   [(3, 7, 4, 3)],
     "stop_double_hour":    [(3, 3, 4, 3)],
     "start_min":           [(4, 6, 7, 6)],
@@ -233,6 +247,10 @@ TIMER_INITIATOR = codec({
     "stop_macro_ptr":      [(6, 1, 2, 9), (8, 7, 8, 7)]
     })
 
+# Macro initiator. Macro initiators in the CM15 are much more
+# complicated than those described in protocol.txt as the intiiator
+# now has a rich set of conditional logic, described by a set of
+# clauses immediately following the macro initiator in bytecode.
 MACRO_INITIATOR = codec({
     "house_code":      [(0, 7, 4, 3)],
     "unit_code":       [(0, 3, 4, 3)],
@@ -242,6 +260,8 @@ MACRO_INITIATOR = codec({
     "macro_ptr":       [(1, 3, 4, 11), (2, 7, 8, 7)]
     })
 
+# Common header for all clause types, describing the logical operation
+# of the clause ("and" or "or") and the comparision operator.
 MACRO_INITIATOR_CLAUSE_HEADER = codec({
     "type":           [(0, 7, 3, 2)],
     "hdr_reserved_1": [(0, 4, 1, 0)],
@@ -250,6 +270,7 @@ MACRO_INITIATOR_CLAUSE_HEADER = codec({
     "logic_op":       [(0, 0, 1, 0)],
     })
 
+# Time clause, including the special (variable) times "sunrise" and "sunset"
 MACRO_INITIATOR_CLAUSE_BODY_TIME_TYPE = codec({
     "reserved":      [(0, 5, 2, 1)],
     "sunrise":       [(0, 6, 1, 0)],
@@ -259,18 +280,22 @@ MACRO_INITIATOR_CLAUSE_BODY_TIME_TYPE = codec({
     "min":           [(1, 6, 7, 6)],
     })
 
+# Day of year clause. Obviously dates after 28th Feb will move by 1
+# day on leap years
 MACRO_INITIATOR_CLAUSE_BODY_DATE_TYPE = codec({
     "year_day":  [(0, 7, 8, 7), (1, 7, 1, 8)],
     "reserved":  [(1, 6, 7, 6)],
     })
 
+# Day of week clause. Only the compare operations "equal" and "not
+# equal" are valid with this type of clause.
 MACRO_INITIATOR_CLAUSE_BODY_DAY_TYPE = codec({
     "reserved_1":     [(0, 7, 1, 0)],
     "week_day_mask":  [(0, 6, 7, 6)],
     "reserved_2":     [(1, 7, 8, 7)],
     })
 
-MACRO_HEADER = codec({
+MACRO_CHAIN_HEADER = codec({
     "reserved_1": [(0, 7, 8, 8), (1, 7, 1, 0)],
     "delay_secs": [(1, 6, 7, 14), (2, 7, 8, 7)],
     "n_elements": [(3, 7, 8, 7)],
@@ -438,7 +463,7 @@ if __name__ == "__main__":
 
     def testMacroChain(self):
       # TODO - finish this
-      self.assertTrue(MACRO_HEADER.self_test())
+      self.assertTrue(MACRO_CHAIN_HEADER.self_test())
       self.assertTrue(MACRO_COMMON.self_test())
       self.assertTrue(MACRO_BRIGHT_DIM_SUFFIX.self_test())
       self.assertTrue(MACRO_EXTENDED_CMD_SUFFIX.self_test())
